@@ -3,9 +3,6 @@ import time
 from http import HTTPStatus
 from typing import Any, AsyncGenerator, Dict, List, Literal, Optional, Tuple, Union
 
-from fastapi import BackgroundTasks, Request
-from fastapi.responses import JSONResponse, StreamingResponse
-from vllm.entrypoints.openai.protocol import ErrorResponse
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
@@ -31,25 +28,30 @@ from functionary.prompt_template.prompt_utils import (
 )
 
 
+class JSONResponse:
+    def __init__(self, content, status_code=200):
+        self.content = content
+        self.status_code = status_code
+
+
 def create_error_response(
-    status_code: HTTPStatus, message: str, param: Optional[str]
-) -> JSONResponse:
-    return JSONResponse(
-        ErrorResponse(
-            message=message,
-            type="invalid_request_error",
-            param=param,
-            code=status_code.value,
-        ).dict(),
-        status_code=status_code.value,
-    )
+    status_code: int, message: str, param: Optional[str] = None
+) -> Dict:
+    return {
+        "error": {
+            "message": message,
+            "type": "invalid_request_error",
+            "param": param,
+            "code": status_code,
+        }
+    }
 
 
-async def check_all_errors(request, served_model) -> Optional[JSONResponse]:
+async def check_all_errors(request, served_model) -> Optional[Dict]:
     if request.model != served_model:
         return create_error_response(
             status_code=HTTPStatus.NOT_FOUND,
-            message=f"The model `{request.model}` does not exist.",
+            message=f"The model {request.model} does not exist.",
             param=None,
         )
     if request.tools and request.functions:
@@ -89,7 +91,7 @@ async def check_all_errors(request, served_model) -> Optional[JSONResponse]:
             message=f"Invalid value for 'tool_choice': 'tool_choice' is only allowed when 'tools' are specified.",
             param="tool_choice",
         )
-    return
+    return None
 
 
 async def check_length(request, input_ids, model_config):
@@ -108,7 +110,7 @@ async def check_length(request, input_ids, model_config):
 
     if token_num + request.max_tokens > context_len:
         return create_error_response(
-            status=HTTPStatus.BAD_REQUEST,
+            status_code=HTTPStatus.BAD_REQUEST,
             message=(
                 f"This model's maximum context length is {context_len} tokens. "
                 f"However, you requested {request.max_tokens + token_num} tokens "
@@ -124,7 +126,7 @@ async def check_length(request, input_ids, model_config):
 
 async def process_chat_completion(
     request: ChatCompletionRequest,
-    raw_request: Optional[Request],
+    raw_request: Optional[Any],
     tokenizer: Any,
     served_model: str,
     engine_model_config: Any,
@@ -219,9 +221,6 @@ async def process_chat_completion(
             prompt_token_ids=prompt_token_ids,
         )
 
-    async def abort_request() -> None:
-        await engine.abort(request_id)
-
     async def wrap_vllm_generator(
         tool_choice,
     ) -> AsyncGenerator[Tuple[str, Optional[str]], None]:
@@ -255,7 +254,6 @@ async def process_chat_completion(
                         elif isinstance(tool_choice, Function):
                             yield tool_choice.name + prompt_template.fn_param_sep_token, finish_reason
                     yield delta_text, finish_reason
-        # yield "", "stop"
 
     async def completion_stream_generator(
         tool_choice, functions
@@ -316,25 +314,14 @@ async def process_chat_completion(
 
     # Streaming response
     if request.stream:
-        background_tasks = BackgroundTasks()
-        # Abort the request if the client disconnects.
-        background_tasks.add_task(abort_request)
-        return StreamingResponse(
-            completion_stream_generator(
-                tool_choice=tool_func_choice,
-                functions=request.functions,
-            ),
-            media_type="text/event-stream",
-            background=background_tasks,
+        return completion_stream_generator(
+            tool_choice=tool_func_choice,
+            functions=request.functions,
         )
 
     # Non-streaming response
     final_res: RequestOutput = None
     async for res in result_generator:
-        if raw_request and await raw_request.is_disconnected():
-            # Abort the request if the client disconnects.
-            await abort_request()
-            return create_error_response(HTTPStatus.BAD_REQUEST, "Client disconnected")
         final_res = res
     assert final_res is not None
     choices = []

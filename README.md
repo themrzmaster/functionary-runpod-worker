@@ -625,3 +625,6 @@ See training [README](functionary/train/README.md)
 - [X] Train Mixtral based model
 - [X] Code interpreter support
 - **Please consider opening a PR for future requests**
+
+## Docker
+docker build -t functionary --build-arg MODEL_NAME="meetkai/functionary-medium-v3.0-AWQ" .
